@@ -19,6 +19,7 @@ package annotations
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"time"
 
@@ -264,6 +265,85 @@ var _ = framework.IngressNginxDescribe("Annotations - Auth", func() {
 
 		Expect(len(errs)).Should(BeNumerically("==", 0))
 		Expect(resp.StatusCode).Should(Equal(http.StatusInternalServerError))
+	})
+
+	It("should return status code 200 when external authentication is configured and signed in", func() {
+		host := "auth"
+
+		err := f.NewHttpbinDeployment()
+		Expect(err).NotTo(HaveOccurred())
+
+		bi, err := f.EnsureIngress(framework.NewSingleIngress(host, "/", host, f.IngressController.Namespace, "http-svc", 80, nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(bi).NotTo(BeNil())
+
+		bi.Annotations["nginx.ingress.kubernetes.io/auth-url"] = fmt.Sprintf("http://httpbin.%s.svc.cluster.local/basic-auth/user/password", f.IngressController.Namespace)
+		bi.Annotations["nginx.ingress.kubernetes.io/auth-signin"] = "http://$host/auth/start"
+
+		ing, err := f.EnsureIngress(bi)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ing).NotTo(BeNil())
+
+		err = f.WaitForNginxServer(host,
+			func(server string) bool {
+				return Expect(server).Should(ContainSubstring("server_name auth")) &&
+					Expect(server).ShouldNot(ContainSubstring("return 503"))
+			})
+		Expect(err).NotTo(HaveOccurred())
+
+		resp, _, errs := gorequest.New().
+			Get(f.IngressController.HTTPURL).
+			Retry(10, 1*time.Second, http.StatusNotFound).
+			Set("Host", host).
+			SetBasicAuth("user", "password").
+			End()
+
+		for _, err := range errs {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(resp.StatusCode).Should(Equal(http.StatusOK))
+	})
+
+	It("should redirect to signin url when external authentication is configured and not signed in", func() {
+		host := "auth"
+
+		err := f.NewHttpbinDeployment()
+		Expect(err).NotTo(HaveOccurred())
+
+		bi, err := f.EnsureIngress(framework.NewSingleIngress(host, "/", host, f.IngressController.Namespace, "http-svc", 80, nil))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(bi).NotTo(BeNil())
+
+		bi.Annotations["nginx.ingress.kubernetes.io/auth-url"] = fmt.Sprintf("http://httpbin.%s.svc.cluster.local/basic-auth/user/password", f.IngressController.Namespace)
+		bi.Annotations["nginx.ingress.kubernetes.io/auth-signin"] = "http://$host/auth/start"
+
+		ing, err := f.EnsureIngress(bi)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ing).NotTo(BeNil())
+
+		err = f.WaitForNginxServer(host,
+			func(server string) bool {
+				return Expect(server).Should(ContainSubstring("server_name auth")) &&
+					Expect(server).ShouldNot(ContainSubstring("return 503"))
+			})
+		Expect(err).NotTo(HaveOccurred())
+
+		resp, _, errs := gorequest.New().
+			Get(f.IngressController.HTTPURL).
+			Retry(10, 1*time.Second, http.StatusNotFound).
+			Set("Host", host).
+			RedirectPolicy(func(req gorequest.Request, via []gorequest.Request) error {
+				return http.ErrUseLastResponse
+			}).
+			Param("a", "b").
+			Param("c", "d").
+			End()
+
+		for _, err := range errs {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(resp.StatusCode).Should(Equal(http.StatusFound))
+		Expect(resp.Header.Get("Location")).Should(Equal(fmt.Sprintf("http://%s/auth/start?rd=http://%s%s", host, host, url.QueryEscape("/?a=b&c=d"))))
 	})
 })
 
